@@ -132,6 +132,7 @@ async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> d
             "currency": event_data.currency,
             "current_status": event_data.event_type.value,
             "latest_event_timestamp": event_data.timestamp,
+            "created_at": event_data.timestamp,
         },
     )
 
@@ -196,12 +197,15 @@ async def get_transactions(
         )
     )
 
-    if merchant_id:
-        query = query.where(Transaction.merchant_id == merchant_id)
 
     if merchant_id:
         query = query.where(Transaction.merchant_id == merchant_id)
+        
     if status:
+        # Validate against Enum to prevent Postgres casting crashes
+        valid_statuses = [e.value for e in EventType]
+        if status not in valid_statuses:
+            return []  
         query = query.where(Transaction.current_status == status)
     if start_date:
         query = query.where(Transaction.created_at >= start_date)
