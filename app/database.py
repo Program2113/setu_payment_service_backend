@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 # Uses an environment variable for deployment, defaults to local docker-compose setup
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/setu_db"
+    "postgresql+asyncpg://postgres:setu_password@localhost:5432/setu_db"
 )
 
 engine = create_async_engine(DATABASE_URL, echo=False)

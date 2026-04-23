@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload, noload
 from sqlalchemy import text, asc, desc
 from datetime import datetime
 from typing import Optional
@@ -11,19 +11,96 @@ from .schemas import EventCreate, SortField, SortDir
 
 
 # ── POST /events ──────────────────────────────────────────────────────────────
+# This is initial version. The new version modified the order of step 3 and step 4
+# async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> dict:
+    # """
+    # Ingest a payment lifecycle event safely and idempotently.
+
+    # Order of operations matters here:
+    #   1. Upsert Merchant    — must exist before Transaction (FK)
+    #   2. Upsert Transaction — must exist before Event (FK)
+    #   3. Chronology Lock    — advance status only if this event is newer
+    #   4. Insert Event       — PK uniqueness enforces idempotency
+
+    # Steps 1 & 2 use INSERT ... ON CONFLICT DO NOTHING so concurrent requests
+    # for the same merchant / transaction never race into an unhandled IntegrityError.
+    # """
+
+    # # ── 1. Upsert Merchant ────────────────────────────────────────────────────
+    # await db.execute(
+    #     text("""
+    #         INSERT INTO merchants (merchant_id, merchant_name)
+    #         VALUES (:merchant_id, :merchant_name)
+    #         ON CONFLICT (merchant_id) DO NOTHING
+    #     """),
+    #     {"merchant_id": event_data.merchant_id, "merchant_name": event_data.merchant_name},
+    # )
+
+    # # ── 2. Upsert Transaction ─────────────────────────────────────────────────
+    # # Insert only if it does not exist yet; concurrent requests are safe.
+    # await db.execute(
+    #     text("""
+    #         INSERT INTO transactions
+    #             (transaction_id, merchant_id, amount, currency, current_status, latest_event_timestamp, created_at)
+    #         VALUES
+    #             (:transaction_id, :merchant_id, :amount, :currency, :current_status, :latest_event_timestamp, NOW())
+    #         ON CONFLICT (transaction_id) DO NOTHING
+    #     """),
+    #     {
+    #         "transaction_id": event_data.transaction_id,
+    #         "merchant_id": event_data.merchant_id,
+    #         "amount": str(event_data.amount),
+    #         "currency": event_data.currency,
+    #         "current_status": event_data.event_type.value,
+    #         "latest_event_timestamp": event_data.timestamp,
+    #     },
+    # )
+
+    # # ── 3. Chronology Lock — advance status only if this event is newer ───────
+    # await db.execute(
+    #     text("""
+    #         UPDATE transactions
+    #         SET current_status          = :current_status,
+    #             latest_event_timestamp  = :latest_event_timestamp
+    #         WHERE transaction_id = :transaction_id
+    #           AND :latest_event_timestamp > latest_event_timestamp
+    #     """),
+    #     {
+    #         "transaction_id": event_data.transaction_id,
+    #         "current_status": event_data.event_type.value,
+    #         "latest_event_timestamp": event_data.timestamp,
+    #     },
+    # )
+
+    # # ── 4. Insert Event (idempotency gate) ────────────────────────────────────
+    # # The Event PK is the definitive idempotency lock.
+    # # If this event_id was already ingested, skip gracefully without touching state.
+    # try:
+    #     db.add(
+    #         Event(
+    #             event_id=event_data.event_id,
+    #             transaction_id=event_data.transaction_id,
+    #             event_type=event_data.event_type,
+    #             timestamp=event_data.timestamp,
+    #         )
+    #     )
+    #     await db.flush()
+    # except IntegrityError:
+    #     await db.rollback()
+    #     return {"status": "ignored", "detail": "duplicate event"}
+
+    # await db.commit()
+    # return {"status": "success", "detail": "event processed"}
 
 async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> dict:
     """
     Ingest a payment lifecycle event safely and idempotently.
 
-    Order of operations matters here:
-      1. Upsert Merchant    — must exist before Transaction (FK)
-      2. Upsert Transaction — must exist before Event (FK)
-      3. Chronology Lock    — advance status only if this event is newer
-      4. Insert Event       — PK uniqueness enforces idempotency
-
-    Steps 1 & 2 use INSERT ... ON CONFLICT DO NOTHING so concurrent requests
-    for the same merchant / transaction never race into an unhandled IntegrityError.
+    Order of operations:
+      1. Upsert Merchant
+      2. Upsert Transaction
+      3. Insert Event (idempotency gate)
+      4. Advance Transaction status only if this event is newer
     """
 
     # ── 1. Upsert Merchant ────────────────────────────────────────────────────
@@ -33,17 +110,19 @@ async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> d
             VALUES (:merchant_id, :merchant_name)
             ON CONFLICT (merchant_id) DO NOTHING
         """),
-        {"merchant_id": event_data.merchant_id, "merchant_name": event_data.merchant_name},
+        {
+            "merchant_id": event_data.merchant_id,
+            "merchant_name": event_data.merchant_name,
+        },
     )
 
     # ── 2. Upsert Transaction ─────────────────────────────────────────────────
-    # Insert only if it does not exist yet; concurrent requests are safe.
     await db.execute(
         text("""
             INSERT INTO transactions
                 (transaction_id, merchant_id, amount, currency, current_status, latest_event_timestamp, created_at)
             VALUES
-                (:transaction_id, :merchant_id, :amount, :currency, :current_status, :latest_event_timestamp, NOW())
+                (:transaction_id, :merchant_id, :amount, :currency, :current_status, :latest_event_timestamp, :latest_event_timestamp)
             ON CONFLICT (transaction_id) DO NOTHING
         """),
         {
@@ -56,12 +135,33 @@ async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> d
         },
     )
 
-    # ── 3. Chronology Lock — advance status only if this event is newer ───────
+    # ── 3. Insert Event (idempotency gate) ───────────────────────────────────
+    result = await db.execute(
+        text("""
+            INSERT INTO events (event_id, transaction_id, event_type, timestamp)
+            VALUES (:event_id, :transaction_id, :event_type, :timestamp)
+            ON CONFLICT (event_id) DO NOTHING
+            RETURNING event_id
+        """),
+        {
+            "event_id": event_data.event_id,
+            "transaction_id": event_data.transaction_id,
+            "event_type": event_data.event_type.value,
+            "timestamp": event_data.timestamp,
+        },
+    )
+
+    # If no row was returned, this event was already processed
+    if result.fetchone() is None:
+        await db.commit()
+        return {"status": "ignored", "detail": "duplicate event"}
+
+    # ── 4. Chronology Lock — advance status only if this event is newer ──────
     await db.execute(
         text("""
             UPDATE transactions
-            SET current_status          = :current_status,
-                latest_event_timestamp  = :latest_event_timestamp
+            SET current_status         = :current_status,
+                latest_event_timestamp = :latest_event_timestamp
             WHERE transaction_id = :transaction_id
               AND :latest_event_timestamp > latest_event_timestamp
         """),
@@ -72,26 +172,8 @@ async def process_incoming_event(db: AsyncSession, event_data: EventCreate) -> d
         },
     )
 
-    # ── 4. Insert Event (idempotency gate) ────────────────────────────────────
-    # The Event PK is the definitive idempotency lock.
-    # If this event_id was already ingested, skip gracefully without touching state.
-    try:
-        db.add(
-            Event(
-                event_id=event_data.event_id,
-                transaction_id=event_data.transaction_id,
-                event_type=event_data.event_type,
-                timestamp=event_data.timestamp,
-            )
-        )
-        await db.flush()
-    except IntegrityError:
-        await db.rollback()
-        return {"status": "ignored", "detail": "duplicate event"}
-
     await db.commit()
     return {"status": "success", "detail": "event processed"}
-
 
 # ── GET /transactions ─────────────────────────────────────────────────────────
 
@@ -106,7 +188,16 @@ async def get_transactions(
     limit: int = 50,
     offset: int = 0,
 ):
-    query = select(Transaction)
+    query = (
+        select(Transaction)
+        .options(
+            joinedload(Transaction.merchant),
+            noload(Transaction.events)  # Prevents the crash while keeping events out of the list
+        )
+    )
+
+    if merchant_id:
+        query = query.where(Transaction.merchant_id == merchant_id)
 
     if merchant_id:
         query = query.where(Transaction.merchant_id == merchant_id)
@@ -131,14 +222,13 @@ async def get_transaction_by_id(db: AsyncSession, transaction_id: str):
     query = (
         select(Transaction)
         .options(
-            joinedload(Transaction.events),    # full event history, ordered by timestamp
-            joinedload(Transaction.merchant),  # merchant name surfaced in response
+            selectinload(Transaction.events),  # Safe async load for collections
+            joinedload(Transaction.merchant),  # Required for the X-to-1 relationship
         )
         .where(Transaction.transaction_id == transaction_id)
     )
     result = await db.execute(query)
     return result.scalar_one_or_none()
-
 
 # ── GET /reconciliation/summary ───────────────────────────────────────────────
 
@@ -199,20 +289,20 @@ async def get_discrepancies(db: AsyncSession):
             t.latest_event_timestamp,
             CASE
                 WHEN t.current_status = 'settled'
-                     AND NOT EXISTS (
-                         SELECT 1 FROM events e
-                         WHERE e.transaction_id = t.transaction_id
-                           AND e.event_type = 'payment_processed'
-                     )
-                THEN 'settled_without_processing'
-
-                WHEN t.current_status = 'settled'
                      AND EXISTS (
                          SELECT 1 FROM events e
                          WHERE e.transaction_id = t.transaction_id
                            AND e.event_type = 'payment_failed'
                      )
                 THEN 'settled_after_failure'
+
+                WHEN t.current_status = 'settled'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM events e
+                         WHERE e.transaction_id = t.transaction_id
+                           AND e.event_type = 'payment_processed'
+                     )
+                THEN 'settled_without_processing'
 
                 WHEN t.current_status = 'payment_initiated'
                      AND NOT EXISTS (

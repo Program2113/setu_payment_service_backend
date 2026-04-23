@@ -207,7 +207,7 @@ BASE_URL=https://<your-app>.onrender.com python seed.py
 **Table creation on startup** — `Base.metadata.create_all` runs on every startup. For a production system, Alembic migrations would replace this.
 
 **What I'd do with more time:**
-- Alembic migration files
 - Pytest integration test suite with a test DB fixture
 - Rate limiting on POST /events
-- Async background worker for settlement reconciliation jobs
+- Async background worker for settlement reconciliation jobs and decouple the API service from heavy computation
+

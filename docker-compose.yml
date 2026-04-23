@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://setu_user:setu_password@db:5432/setu_db
+      - DATABASE_URL=postgresql+asyncpg://postgres:setu_password@localhost:5432/setu_db
     depends_on:
       db:
         condition: service_healthy   # wait for Postgres to be ready, not just started
@@ -15,7 +15,7 @@ services:
   db:
     image: postgres:15-alpine
     environment:
-      - POSTGRES_USER=setu_user
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=setu_password
       - POSTGRES_DB=setu_db
     ports:
@@ -23,7 +23,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U setu_user -d setu_db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d setu_db"]
       interval: 5s
       timeout: 5s
       retries: 10
