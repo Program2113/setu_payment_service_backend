@@ -35,25 +35,18 @@ PostgreSQL
 
 ---
 
-## Local Setup
+## Local Setup & Testing
 
-### Prerequisites
-- Docker and Docker Compose
+This service is fully containerized. You only need Docker installed on your machine to run it.
 
-### Run
+**1. Start the service**
+Unzip the project, open your terminal in the root directory, and run:
+`docker compose up -d --build`
+*(The API will be available at `http://localhost:8000`)*
 
-```bash
-docker compose up --build
-```
-
-The service starts at `http://localhost:8000`. Postgres is ready before the app starts (healthcheck enforced).
-
-### Seed ~10,000 test events
-
-```bash
-pip install httpx
-python seed.py
-```
+**2. (Optional) Seed the database**
+To instantly populate the database with ~10,000 realistic payment events (including happy paths, failures, and generated discrepancies), run:
+`docker compose exec web python seed.py`
 
 This generates events across 5 merchants with a realistic mix of:
 - Successful flows (initiated → processed → settled)
@@ -61,7 +54,14 @@ This generates events across 5 merchants with a realistic mix of:
 - Stuck/pending (initiated only, older than 1 hour)
 - Discrepancies (settled without processing, settled after failure)
 - Out-of-order delivery
-- Duplicate events (50 re-submissions — all ignored gracefully)
+- Duplicate events (~240 re-submissions — all ignored gracefully)
+
+**3. Run the automated test suite**
+The project includes a robust test suite that runs against an isolated in-memory SQLite database (zero state leakage). To run the 100+ tests:
+`docker compose exec web pytest tests`
+
+**📝 Postman Collection Included**
+A Postman collection (`<Name_of_your_collection_file>.json`) is included in the root of this repository. Import it into Postman to instantly test all endpoints against your local `http://localhost:8000` environment.
 
 ---
 
@@ -177,17 +177,6 @@ Returns transactions with logical inconsistencies, labelled by type.
     "discrepancy_type": "settled_after_failure"
   }
 ]
-```
-
----
-
-## Deployment
-
-Deployed on **Render** at: `https://<your-app>.onrender.com`
-
-To seed the deployed instance:
-```bash
-BASE_URL=https://<your-app>.onrender.com python seed.py
 ```
 
 ---
