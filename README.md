@@ -61,7 +61,7 @@ The project includes a robust test suite that runs against an isolated in-memory
 `docker compose exec web pytest tests`
 
 **📝 Postman Collection Included**
-A Postman collection (`<Name_of_your_collection_file>.json`) is included in the root of this repository. Import it into Postman to instantly test all endpoints against your local `http://localhost:8000` environment.
+A Postman collection (`solutions_engineer_assignment.postman_collection.json`) is included in the root of this repository. Import it into Postman to instantly test all endpoints against your local `http://localhost:8000` environment.
 
 ---
 
