@@ -237,53 +237,41 @@ async def get_transaction_by_id(db: AsyncSession, transaction_id: str):
 # ── GET /reconciliation/summary ───────────────────────────────────────────────
 
 async def get_reconciliation_summary(db: AsyncSession):
-    """
-    Groups by merchant, settlement date (from the event timestamp, not ingestion
-    time) and status. Using latest_event_timestamp ensures late-arriving events
-    land in the correct date bucket.
-    """
-    query = text("""
+    # Detect if we are running the test suite (SQLite) or production (Postgres)
+    is_sqlite = db.bind.dialect.name == "sqlite"
+    date_expr = "DATE(latest_event_timestamp)" if is_sqlite else "DATE(latest_event_timestamp AT TIME ZONE 'UTC')"
+
+    query = text(f"""
         SELECT
             merchant_id,
-            DATE(latest_event_timestamp AT TIME ZONE 'UTC') AS date,
+            {date_expr} AS date,
             current_status,
-            COUNT(*)                                        AS count,
-            SUM(amount)                                     AS total_amount
+            COUNT(*) AS count,
+            SUM(amount) AS total_amount
         FROM transactions
-        GROUP BY merchant_id, DATE(latest_event_timestamp AT TIME ZONE 'UTC'), current_status
+        GROUP BY merchant_id, {date_expr}, current_status
         ORDER BY merchant_id, date DESC, current_status;
     """)
     result = await db.execute(query)
     return [
         {
             "merchant_id": row[0],
-            "date": str(row[1]),
+            "date": row[1],
             "status": row[2],
             "count": row[3],
             "total_amount": float(row[4]) if row[4] is not None else 0.0,
         }
-        for row in result.all()
+        for row in result.fetchall()
     ]
-
 
 # ── GET /reconciliation/discrepancies ─────────────────────────────────────────
 
 async def get_discrepancies(db: AsyncSession):
-    """
-    Detects three classes of logical inconsistency:
+    # Detect if we are running the test suite (SQLite) or production (Postgres)
+    is_sqlite = db.bind.dialect.name == "sqlite"
+    time_expr = "datetime('now', '-1 hour')" if is_sqlite else "NOW() - INTERVAL '1 hour'"
 
-      settled_without_processing — current_status='settled' but no
-        'payment_processed' event exists. Settlement recorded without
-        a prior successful payment.
-
-      settled_after_failure — current_status='settled' but a
-        'payment_failed' event exists. A failed payment reached settled.
-
-      stuck_initiated — current_status='payment_initiated' with no
-        subsequent 'payment_processed' or 'payment_failed' event and
-        the transaction is older than 1 hour. Flags abandoned/stalled flows.
-    """
-    query = text("""
+    query = text(f"""
         SELECT
             t.transaction_id,
             t.merchant_id,
@@ -314,7 +302,7 @@ async def get_discrepancies(db: AsyncSession):
                          WHERE e.transaction_id = t.transaction_id
                            AND e.event_type IN ('payment_processed', 'payment_failed')
                      )
-                     AND t.latest_event_timestamp < NOW() - INTERVAL '1 hour'
+                     AND t.latest_event_timestamp < {time_expr}
                 THEN 'stuck_initiated'
             END AS discrepancy_type
         FROM transactions t
@@ -342,7 +330,7 @@ async def get_discrepancies(db: AsyncSession):
                     WHERE e.transaction_id = t.transaction_id
                       AND e.event_type IN ('payment_processed', 'payment_failed')
                 )
-                AND t.latest_event_timestamp < NOW() - INTERVAL '1 hour'
+                AND t.latest_event_timestamp < {time_expr}
             )
         ORDER BY t.latest_event_timestamp DESC;
     """)
@@ -354,8 +342,9 @@ async def get_discrepancies(db: AsyncSession):
             "current_status": row[2],
             "amount": float(row[3]) if row[3] is not None else 0.0,
             "currency": row[4],
-            "latest_event_timestamp": row[5].isoformat() if row[5] else None,
+            # If it has isoformat (Postgres datetime), use it. Otherwise, use the string (SQLite)
+            "latest_event_timestamp": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
             "discrepancy_type": row[6],
         }
-        for row in result.all()
+        for row in result.fetchall()
     ]

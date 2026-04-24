@@ -26,7 +26,7 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
 
 # ── Path fix so `app` is importable from `tests/` ────────────────────────────
 import sys
@@ -39,17 +39,18 @@ from app.database import get_db
 # ── Database URL ──────────────────────────────────────────────────────────────
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:setu_password@localhost:5432/setu_db",
+    "sqlite+aiosqlite:///:memory:",
 )
 
 # ── Engine & session factory (module-scoped so the engine is created once) ───
 @pytest.fixture(scope="session")
 def engine():
+    is_sqlite = "sqlite" in TEST_DATABASE_URL
     return create_async_engine(
         TEST_DATABASE_URL,
         echo=False,
-        poolclass=NullPool,  # <-- Add this line
-        connect_args={"check_same_thread": False} if "sqlite" in TEST_DATABASE_URL else {},
+        poolclass=StaticPool if is_sqlite else None,  # <-- Add this line
+        connect_args={"check_same_thread": False} if is_sqlite else {},
     )
 
 
